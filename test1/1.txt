@@ -1,0 +1,128 @@
+﻿using System;
+using Autodesk.Revit.Attributes;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.DB.Architecture;
+using Autodesk.Revit.UI;
+using Autodesk.Revit.UI.Selection;
+using TaskDialog = Autodesk.Revit.UI.TaskDialog;
+
+namespace RevitAddin
+{
+    [Transaction(TransactionMode.Manual)]
+    public class Test : IExternalCommand
+    {
+        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            UIDocument uidoc = commandData.Application.ActiveUIDocument;
+            Document doc = uidoc.Document;
+
+            try
+            {
+                // 1. 拾取一个元素
+                Reference r = uidoc.Selection.PickObject(ObjectType.Element, "请选择一个栏杆");
+                Element elem = doc.GetElement(r);
+
+                // 2. 判断是否为栏杆
+                if (elem is Railing railing)
+                {
+                    // 3. 获取顶级扶手实例的 ID
+                    // 这一步拿到的就是你在 Lookup 里看到的那个 ID (如 337728)
+                    ElementId topRailId = railing.TopRail;
+
+                    Element topRail = doc.GetElement(topRailId);
+                    ContinuousRail topRailInstance = doc.GetElement(topRailId) as ContinuousRail;
+                    ElementId topRailTypeId = topRailInstance.GetTypeId();
+                    TopRailType trType = doc.GetElement(topRailTypeId) as TopRailType;
+
+                    if (topRailId != ElementId.InvalidElementId)
+                    {
+
+                        TaskDialog.Show("获取成功",
+                            $"栏杆名称: {railing.Name}\n" +
+                            $"栏杆 ID: {railing.Id}\n\n" +
+                            $"--- 顶级扶手信息 ---\n" +
+                            $"顶级扶手名称: {topRail.Name}\n" +
+                            $"顶级扶手 ID: {topRailId}\n" +
+                            $"type:{trType.ProfileId}");
+                    }
+                    else
+                    {
+                        TaskDialog.Show("提示", "该栏杆类型在属性中未启用‘顶级扶手’。");
+                    }
+
+                    using (Transaction t = new Transaction(doc, "替换顶级扶手截面"))
+                    {
+                        t.Start();
+                        try
+                        {
+                            // 1. 载入并准备你的“截面”族
+                            string rfaPath = @"D:\test\test1\test1\截面.rfa";
+                            FamilySymbol profileSym = null;
+
+                            // 优先检查项目内是否已存在名为“截面”的族
+                            Family fam = new FilteredElementCollector(doc)
+                                            .OfClass(typeof(Family))
+                                            .Cast<Family>()
+                                            .FirstOrDefault(f => f.Name == "截面");
+
+                            if (fam == null)
+                            {
+                                if (!System.IO.File.Exists(rfaPath)) throw new Exception("磁盘找不到族文件: " + rfaPath);
+                                doc.LoadFamily(rfaPath, out fam);
+                            }
+
+                            // 获取该族下的第一个类型并强制激活 (防止 image_de1a5d 的空引用报错)
+                            profileSym = doc.GetElement(fam.GetFamilySymbolIds().First()) as FamilySymbol;
+                            if (!profileSym.IsActive) profileSym.Activate();
+
+                            // 2. 核心替换逻辑：通过中文名称“轮廓”定位并赋值
+                            // trType 是你已经拿到的 TopRailType 对象
+                            
+                            Parameter pProfile = trType.get_Parameter(BuiltInParameter.CONTINUOUSRAIL_PROFILE_TYPE_PARAM);
+                            TaskDialog.Show("成功", $"顶级扶手轮廓已成功替换为：{pProfile}");
+                            if (pProfile != null)
+                            {
+                                // 执行赋值：将原本的 16334 替换为你新载入族的 ID
+                                pProfile.Set(profileSym.Id);
+
+                                // 🚨 强制重生成与刷新，确保 ID 337728 产生物理形变
+                                doc.Regenerate();
+                                t.Commit();
+                                uidoc.RefreshActiveView();
+
+                                TaskDialog.Show("成功", $"顶级扶手轮廓已成功替换为：{pProfile}");
+                            }
+                            else
+                            {
+                                TaskDialog.Show("失败", "在 TopRailType 中找不到名为‘轮廓’的参数。");
+                                t.RollBack();
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            TaskDialog.Show("错误详情", ex.Message);
+                            t.RollBack();
+                        }
+                    }
+
+                }
+                else
+                {
+                    TaskDialog.Show("错误", "请务必选择整个‘栏杆’对象，而不是其中的零件。");
+                }
+
+                return Result.Succeeded;
+            }
+            catch (Autodesk.Revit.Exceptions.OperationCanceledException)
+            {
+                return Result.Cancelled;
+            }
+            catch (Exception ex)
+            {
+                // 捕获可能出现的 Object reference 报错
+                message = ex.Message;
+                return Result.Failed;
+            }
+        }
+    }
+}
