@@ -1,0 +1,244 @@
+﻿using System;
+using System.Linq;
+using Autodesk.Revit.Attributes;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.DB.Architecture;
+using Autodesk.Revit.UI;
+using Autodesk.Revit.UI.Selection;
+
+namespace RevitAddin
+{
+    [Transaction(TransactionMode.Manual)]
+    public class Test : IExternalCommand
+    {
+        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            UIDocument uidoc = commandData.Application.ActiveUIDocument;
+            Document doc = uidoc.Document;
+
+            try
+            {
+                Reference r = uidoc.Selection.PickObject(ObjectType.Element, "请选择要设置立柱的栏杆");
+                Railing railing = doc.GetElement(r) as Railing;
+
+                if (railing != null)
+                {
+                    PostConfigWindow win = new PostConfigWindow(doc, railing);
+                    bool? result = win.ShowDialog();
+
+                    if (result == true)
+                    {
+                        uidoc.RefreshActiveView();
+                    }
+                }
+                return Result.Succeeded;
+            }
+            catch (Autodesk.Revit.Exceptions.OperationCanceledException)
+            {
+                return Result.Cancelled;
+            }
+            catch (Exception ex)
+            {
+                Autodesk.Revit.UI.TaskDialog.Show("运行报错", ex.Message);
+                return Result.Failed;
+            }
+        }
+    }
+
+    // ==========================================
+    // 纯 C# 写的 WPF 立柱设置窗体类 (完全规避语法报错版)
+    // ==========================================
+    public class PostConfigWindow : System.Windows.Window
+    {
+        private Document _doc;
+        private Railing _railing;
+
+        private System.Windows.Controls.TextBox txtStartW, txtStartH, txtStartT;
+        private System.Windows.Controls.TextBox txtEndW, txtEndH, txtEndT;
+        private System.Windows.Controls.TextBox txtCornerW, txtCornerH, txtCornerT;
+        private System.Windows.Controls.CheckBox chkCorner;
+
+        public PostConfigWindow(Document doc, Railing railing)
+        {
+            _doc = doc;
+            _railing = railing;
+
+            this.Title = "立柱极速设置面板 (起点/终点/转角)";
+            this.Width = 540;
+            this.Height = 360;
+            this.WindowStartupLocation = System.Windows.WindowStartupLocation.CenterScreen;
+
+            System.Windows.Controls.Grid grid = new System.Windows.Controls.Grid { Margin = new System.Windows.Thickness(15) };
+            grid.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = new System.Windows.GridLength(110) });
+            grid.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = new System.Windows.GridLength(1, System.Windows.GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = new System.Windows.GridLength(1, System.Windows.GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = new System.Windows.GridLength(1, System.Windows.GridUnitType.Star) });
+
+            int rowIndex = 0;
+
+            // 1. 表头
+            grid.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = System.Windows.GridLength.Auto });
+            AddHeader(grid, rowIndex, "宽度(mm)", 1);
+            AddHeader(grid, rowIndex, "高度(mm)", 2);
+            AddHeader(grid, rowIndex, "厚度(mm)", 3);
+            rowIndex++;
+
+            // 2. 添加起点和终点输入行 (调用正规类方法，避开 Lambda 报错)
+            AddInputRow(grid, ref rowIndex, "起点立柱尺寸:", out txtStartW, out txtStartH, out txtStartT);
+            AddInputRow(grid, ref rowIndex, "终点立柱尺寸:", out txtEndW, out txtEndH, out txtEndT);
+
+            // 3. 转角复选框
+            grid.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = System.Windows.GridLength.Auto });
+            chkCorner = new System.Windows.Controls.CheckBox { Content = "启用转角立柱", IsChecked = true, VerticalAlignment = System.Windows.VerticalAlignment.Center, Margin = new System.Windows.Thickness(0, 15, 0, 5), FontWeight = System.Windows.FontWeights.Bold };
+            System.Windows.Controls.Grid.SetRow(chkCorner, rowIndex); System.Windows.Controls.Grid.SetColumnSpan(chkCorner, 4); grid.Children.Add(chkCorner);
+            rowIndex++;
+
+            // 4. 添加转角尺寸输入行
+            AddInputRow(grid, ref rowIndex, "转角立柱尺寸:", out txtCornerW, out txtCornerH, out txtCornerT);
+
+            chkCorner.Checked += (s, e) => { txtCornerW.IsEnabled = true; txtCornerH.IsEnabled = true; txtCornerT.IsEnabled = true; };
+            chkCorner.Unchecked += (s, e) => { txtCornerW.IsEnabled = false; txtCornerH.IsEnabled = false; txtCornerT.IsEnabled = false; };
+
+            // 5. 应用按钮
+            grid.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = System.Windows.GridLength.Auto });
+            System.Windows.Controls.Button btnApply = new System.Windows.Controls.Button
+            {
+                Content = "生成并应用立柱",
+                Height = 35,
+                Margin = new System.Windows.Thickness(0, 20, 0, 0),
+                Background = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#0078D7")),
+                Foreground = System.Windows.Media.Brushes.White,
+                FontWeight = System.Windows.FontWeights.Bold,
+                FontSize = 14
+            };
+            btnApply.Click += BtnApply_Click;
+            System.Windows.Controls.Grid.SetRow(btnApply, rowIndex); System.Windows.Controls.Grid.SetColumnSpan(btnApply, 4); grid.Children.Add(btnApply);
+
+            this.Content = grid;
+        }
+
+        // --- 提取的正规辅助方法 ---
+        private void AddHeader(System.Windows.Controls.Grid grid, int rowIndex, string text, int col)
+        {
+            System.Windows.Controls.TextBlock tb = new System.Windows.Controls.TextBlock { Text = text, FontWeight = System.Windows.FontWeights.Bold, HorizontalAlignment = System.Windows.HorizontalAlignment.Center, Margin = new System.Windows.Thickness(0, 0, 0, 10) };
+            System.Windows.Controls.Grid.SetRow(tb, rowIndex); System.Windows.Controls.Grid.SetColumn(tb, col); grid.Children.Add(tb);
+        }
+
+        private void AddInputRow(System.Windows.Controls.Grid grid, ref int rowIndex, string label, out System.Windows.Controls.TextBox wBox, out System.Windows.Controls.TextBox hBox, out System.Windows.Controls.TextBox tBox)
+        {
+            grid.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = System.Windows.GridLength.Auto });
+
+            System.Windows.Controls.TextBlock tb = new System.Windows.Controls.TextBlock { Text = label, VerticalAlignment = System.Windows.VerticalAlignment.Center, Margin = new System.Windows.Thickness(0, 8, 0, 8) };
+            System.Windows.Controls.Grid.SetRow(tb, rowIndex); System.Windows.Controls.Grid.SetColumn(tb, 0); grid.Children.Add(tb);
+
+            wBox = new System.Windows.Controls.TextBox { Text = "50", Margin = new System.Windows.Thickness(5), VerticalAlignment = System.Windows.VerticalAlignment.Center, Padding = new System.Windows.Thickness(2) };
+            System.Windows.Controls.Grid.SetRow(wBox, rowIndex); System.Windows.Controls.Grid.SetColumn(wBox, 1); grid.Children.Add(wBox);
+
+            hBox = new System.Windows.Controls.TextBox { Text = "50", Margin = new System.Windows.Thickness(5), VerticalAlignment = System.Windows.VerticalAlignment.Center, Padding = new System.Windows.Thickness(2) };
+            System.Windows.Controls.Grid.SetRow(hBox, rowIndex); System.Windows.Controls.Grid.SetColumn(hBox, 2); grid.Children.Add(hBox);
+
+            tBox = new System.Windows.Controls.TextBox { Text = "5", Margin = new System.Windows.Thickness(5), VerticalAlignment = System.Windows.VerticalAlignment.Center, Padding = new System.Windows.Thickness(2) };
+            System.Windows.Controls.Grid.SetRow(tBox, rowIndex); System.Windows.Controls.Grid.SetColumn(tBox, 3); grid.Children.Add(tBox);
+
+            rowIndex++;
+        }
+
+        private FamilySymbol GetOrCreateSym(Family baseFamily, FamilySymbol baseSym, string prefix, string wText, string hText, string tText)
+        {
+            string symName = $"{prefix}_{wText}x{hText}x{tText}mm";
+            FamilySymbol sym = null;
+
+            // 1. 安全地遍历查找，避免将 null 传给 GetElement
+            foreach (ElementId id in baseFamily.GetFamilySymbolIds())
+            {
+                FamilySymbol existingSym = _doc.GetElement(id) as FamilySymbol;
+                if (existingSym != null && existingSym.Name == symName)
+                {
+                    sym = existingSym;
+                    break; // 找到了对应的尺寸类型，直接跳出循环
+                }
+            }
+
+            // 2. 如果没找到 (sym 依然是 null)，说明是新尺寸，执行复制新建
+            if (sym == null)
+            {
+                sym = baseSym.Duplicate(symName) as FamilySymbol;
+
+                Parameter pW = sym.LookupParameter("宽度");
+                Parameter pH = sym.LookupParameter("高度");
+                Parameter pT = sym.LookupParameter("厚度");
+
+                if (pW != null && !pW.IsReadOnly) pW.Set(double.Parse(wText) / 304.8);
+                if (pH != null && !pH.IsReadOnly) pH.Set(double.Parse(hText) / 304.8);
+                if (pT != null && !pT.IsReadOnly) pT.Set(double.Parse(tText) / 304.8);
+            }
+
+            // 确保激活状态
+            if (!sym.IsActive) sym.Activate();
+            return sym;
+        }
+
+        // --- 核心写入逻辑 ---
+        private void BtnApply_Click(object sender, System.Windows.RoutedEventArgs e)
+        {
+            try
+            {
+                using (Transaction t = new Transaction(_doc, "一键设置所有立柱"))
+                {
+                    t.Start();
+
+                    string rfaPath = @"D:\test\test1\test1\中间立柱.rfa";
+                    Family fam = new FilteredElementCollector(_doc).OfClass(typeof(Family)).Cast<Family>().FirstOrDefault(f => f.Name == "中间立柱");
+
+                    if (fam == null)
+                    {
+                        if (!System.IO.File.Exists(rfaPath)) { System.Windows.MessageBox.Show("找不到立柱族文件: " + rfaPath); return; }
+                        _doc.LoadFamily(rfaPath, out fam);
+                    }
+
+                    FamilySymbol baseSym = _doc.GetElement(fam.GetFamilySymbolIds().First()) as FamilySymbol;
+                    if (!baseSym.IsActive) baseSym.Activate();
+
+                    FamilySymbol startSym = GetOrCreateSym(fam, baseSym, "起点", txtStartW.Text, txtStartH.Text, txtStartT.Text);
+                    FamilySymbol endSym = GetOrCreateSym(fam, baseSym, "终点", txtEndW.Text, txtEndH.Text, txtEndT.Text);
+                    FamilySymbol cornerSym = null;
+                    if (chkCorner.IsChecked == true) cornerSym = GetOrCreateSym(fam, baseSym, "转角", txtCornerW.Text, txtCornerH.Text, txtCornerT.Text);
+
+                    // ... 前面的获取和复制族类型的代码保持不变 ...
+
+                    // 4. 提取并修改立柱系统结构 (它是实时代理，拿出来直接改！)
+                    RailingType rType = _doc.GetElement(_railing.GetTypeId()) as RailingType;
+                    BalusterPlacement bp = rType.BalusterPlacement;
+                    PostPattern postPat = bp.PostPattern;
+
+                    if (postPat.StartPost != null) postPat.StartPost.BalusterFamilyId = startSym.Id;
+                    if (postPat.EndPost != null) postPat.EndPost.BalusterFamilyId = endSym.Id;
+
+                    if (chkCorner.IsChecked == true)
+                    {
+                        if (postPat.CornerPost != null) postPat.CornerPost.BalusterFamilyId = cornerSym.Id;
+                    }
+                    else
+                    {
+                        // 如果不勾选，则设为 <无>
+                        if (postPat.CornerPost != null) postPat.CornerPost.BalusterFamilyId = ElementId.InvalidElementId;
+                    }
+
+                    // 🚨 终极奥义：把下面这行彻底删掉！不需要 Set，也不需要 get_Parameter 赋值！
+                    // rType.SetBalusterPlacement(bp);  <--- 就是它惹的祸，删！
+
+                    // 直接强制重算模型并提交，大功告成
+                    _doc.Regenerate();
+                    t.Commit();
+                }
+
+                this.DialogResult = true;
+                this.Close();
+            }
+            catch (Exception ex)
+            {
+                System.Windows.MessageBox.Show(ex.Message + "\n" + ex.StackTrace, "发生错误");
+            }
+        }
+    }
+}

@@ -1,0 +1,119 @@
+﻿using System;
+using System.Linq;
+using Autodesk.Revit.Attributes;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.DB.Architecture;
+using Autodesk.Revit.UI;
+using Autodesk.Revit.UI.Selection;
+
+namespace RevitAddin
+{
+    [Transaction(TransactionMode.Manual)]
+    public class Test : IExternalCommand
+    {
+        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            Document doc = commandData.Application.ActiveUIDocument.Document;
+
+            try
+            {
+                Reference r = commandData.Application.ActiveUIDocument.Selection.PickObject(ObjectType.Element, "请选择栏杆");
+                Railing railing = doc.GetElement(r) as Railing;
+                if (railing == null) return Result.Cancelled;
+
+                using (Transaction t = new Transaction(doc, "程序化增加阵列数据测试"))
+                {
+                    t.Start();
+                    RailingType rType = doc.GetElement(railing.GetTypeId()) as RailingType;
+
+                    // ==========================================
+                    // 1. 清理非连续横杆 (保留 1 和 4)
+                    // ==========================================
+                    NonContinuousRailStructure rails = rType.RailStructure;
+                    for (int i = rails.GetNonContinuousRailCount() - 1; i >= 0; i--)
+                    {
+                        string railName = rails.GetNonContinuousRail(i).Name;
+                        if (!railName.Contains("1") && !railName.Contains("4"))
+                        {
+                            rails.RemoveNonContinuousRail(i);
+                        }
+                    }
+
+                    // ==========================================
+                    // 2. 强制载入族，并拿到两个不同的族类型做测试
+                    // ==========================================
+                    string rfaPath = @"D:\test\test1\test1\中间立柱.rfa";
+                    Family fam = new FilteredElementCollector(doc)
+                                    .OfClass(typeof(Family))
+                                    .Cast<Family>()
+                                    .FirstOrDefault(f => f.Name == "中间立柱");
+
+                    if (fam == null)
+                    {
+                        if (!System.IO.File.Exists(rfaPath)) throw new Exception("磁盘找不到族文件: " + rfaPath);
+                        doc.LoadFamily(rfaPath, out fam);
+                    }
+
+                    // 🚨 修正冲突：在这里统一声明，拿到族里的第一个类型（当大柱子）和最后一个类型（当小柱子）
+                    FamilySymbol mainPostSym = doc.GetElement(fam.GetFamilySymbolIds().First()) as FamilySymbol;
+                    FamilySymbol picketSym = doc.GetElement(fam.GetFamilySymbolIds().Last()) as FamilySymbol;
+
+                    if (!mainPostSym.IsActive) mainPostSym.Activate();
+                    if (!picketSym.IsActive) picketSym.Activate();
+
+                    // ==========================================
+                    // 3. 核心测试：动态增行 + 偷梁换柱赋不同族
+                    // ==========================================
+                    BalusterPlacement bp = rType.BalusterPlacement;
+                    BalusterPattern balusterPat = bp.BalusterPattern;
+
+                    if (balusterPat.GetBalusterCount() == 0)
+                    {
+                        throw new Exception("该栏杆的主立柱阵列为空，请至少找一个有1行竖杆的栏杆作为种子！");
+                    }
+
+                    // 【清理多余行】只保留第0行作为复制的“母体”
+                    while (balusterPat.GetBalusterCount() > 1)
+                    {
+                        balusterPat.RemoveBaluster(balusterPat.GetBalusterCount() - 1);
+                    }
+
+                    // 🌟 第一步：先把坚挺的“老同志”(第0行) 变成【大立柱】
+                    BalusterInfo bInfo0 = balusterPat.GetBaluster(0);
+                    bInfo0.BalusterFamilyId = mainPostSym.Id;
+                    bInfo0.TopReferenceName = "扶栏 1";
+                    bInfo0.BaseReferenceName = "主体"; // 接地
+                    bInfo0.DistanceFromPreviousOrSpace = 1200.0 / 304.8; // 大间距
+                    bInfo0.TopOffset = 0.0;
+                    bInfo0.BaseOffset = 0.0;
+
+                    // 🌟 第二步：复制第 0 行！
+                    // 此时诞生的第 1 行，完美继承了【大立柱】的所有属性，不再去碰它脆弱的族ID！
+                    balusterPat.DuplicateBaluster(0);
+
+                    // 🌟 第三步：杀个回马枪！回头把第 0 行改成【小竖杆】
+                    // 重新抓取第 0 行的遥控器，老同志随便改不崩溃
+                    BalusterInfo bInfo0_Again = balusterPat.GetBaluster(0);
+                    bInfo0_Again.BalusterFamilyId = picketSym.Id; // 成功赋上小竖杆尺寸！
+                    bInfo0_Again.TopReferenceName = "扶栏 1";
+                    bInfo0_Again.BaseReferenceName = "扶栏 4"; // 悬空
+                    bInfo0_Again.DistanceFromPreviousOrSpace = 150.0 / 304.8; // 小间距
+
+                    // 绝对不需要回填 Set，直接重算并提交！
+                    doc.Regenerate();
+                    t.Commit();
+                }
+
+                commandData.Application.ActiveUIDocument.RefreshActiveView();
+                Autodesk.Revit.UI.TaskDialog.Show("大功告成", "已通过'偷梁换柱'成功用程序动态增加了两行拥有不同族ID的数据！");
+
+                return Result.Succeeded;
+            }
+            catch (Exception ex)
+            {
+                Autodesk.Revit.UI.TaskDialog.Show("报错排查", ex.Message + "\n" + ex.StackTrace);
+                return Result.Failed;
+            }
+        }
+    }
+}

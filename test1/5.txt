@@ -1,0 +1,99 @@
+﻿using System;
+using System.Linq;
+using Autodesk.Revit.Attributes;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.DB.Architecture;
+using Autodesk.Revit.UI;
+using Autodesk.Revit.UI.Selection;
+
+namespace RevitAddin
+{
+    [Transaction(TransactionMode.Manual)]
+    public class Test : IExternalCommand
+    {
+        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            Document doc = commandData.Application.ActiveUIDocument.Document;
+
+            try
+            {
+                Reference r = commandData.Application.ActiveUIDocument.Selection.PickObject(ObjectType.Element, "请选择栏杆");
+                Railing railing = doc.GetElement(r) as Railing;
+                if (railing == null) return Result.Cancelled;
+
+                using (Transaction t = new Transaction(doc, "重构主立柱阵列"))
+                {
+                    t.Start();
+                    RailingType rType = doc.GetElement(railing.GetTypeId()) as RailingType;
+
+                    // ==========================================
+                    // 1. 清理非连续横杆 (保留 1 和 4)
+                    // ==========================================
+                    NonContinuousRailStructure rails = rType.RailStructure;
+                    for (int i = rails.GetNonContinuousRailCount() - 1; i >= 0; i--)
+                    {
+                        string railName = rails.GetNonContinuousRail(i).Name;
+                        if (!railName.Contains("1") && !railName.Contains("4"))
+                        {
+                            rails.RemoveNonContinuousRail(i);
+                        }
+                    }
+
+                    // ==========================================
+                    // 2. 强制载入并获取“中间立柱” (杜绝静默失败)
+                    // ==========================================
+                    string rfaPath = @"D:\test\test1\test1\中间立柱.rfa";
+                    Family fam = new FilteredElementCollector(doc)
+                                    .OfClass(typeof(Family))
+                                    .Cast<Family>()
+                                    .FirstOrDefault(f => f.Name == "中间立柱");
+
+                    if (fam == null)
+                    {
+                        if (!System.IO.File.Exists(rfaPath)) throw new Exception("磁盘找不到族文件: " + rfaPath);
+                        doc.LoadFamily(rfaPath, out fam);
+                    }
+                    FamilySymbol mainPostSym = doc.GetElement(fam.GetFamilySymbolIds().First()) as FamilySymbol;
+                    if (!mainPostSym.IsActive) mainPostSym.Activate();
+
+                    // ==========================================
+                    // 3. 实时代理修改立柱阵列
+                    // ==========================================
+                    BalusterPlacement bp = rType.BalusterPlacement;
+                    BalusterPattern balusterPat = bp.BalusterPattern;
+
+                    if (balusterPat.GetBalusterCount() == 0)
+                    {
+                        throw new Exception("该栏杆的主立柱阵列为空，无法提取底层代理！");
+                    }
+
+                    // 拿到第 0 行的实时代理遥控器
+                    BalusterInfo bInfo = balusterPat.GetBaluster(0);
+
+                    // 🚨 直接按遥控器，底层数据实时改变！
+                    bInfo.BalusterFamilyId = mainPostSym.Id;
+                    bInfo.TopReferenceName = "扶栏 1";
+                    bInfo.BaseReferenceName = "扶栏 4";
+                    bInfo.DistanceFromPreviousOrSpace = 150.0 / 304.8; // 间距 150mm
+                    bInfo.TopOffset = 0.0;
+                    bInfo.BaseOffset = 0.0;
+
+                    // 绝对不需要回填 Set，直接重算并提交！
+                    doc.Regenerate();
+                    t.Commit();
+                }
+
+                commandData.Application.ActiveUIDocument.RefreshActiveView();
+                Autodesk.Revit.UI.TaskDialog.Show("大功告成", "中间横杆已清除，小竖杆已按照 150mm 完美阵列！");
+
+                return Result.Succeeded;
+            }
+            catch (Exception ex)
+            {
+                // 如果这次还失败，必然会弹窗告诉你准确的报错原因！
+                Autodesk.Revit.UI.TaskDialog.Show("报错排查", ex.Message + "\n" + ex.StackTrace);
+                return Result.Failed;
+            }
+        }
+    }
+}
