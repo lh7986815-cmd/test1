@@ -16,7 +16,6 @@ namespace RevitAddin
     {
         public bool AllowElement(Element elem)
         {
-            // 允许拾取模型线或详图线
             return elem is CurveElement;
         }
 
@@ -36,25 +35,31 @@ namespace RevitAddin
 
             try
             {
-                // 1. 拾取线段
-                Reference r = uidoc.Selection.PickObject(ObjectType.Element, new LineSelectionFilter(), "请在视图中拾取一条模型线或详图线作为栏杆路径");
-                CurveElement curveElem = doc.GetElement(r) as CurveElement;
-                if (curveElem == null) return Result.Cancelled;
+                // 🚨 需求3：拾取多条线段 (框选或按住Ctrl点选)
+                IList<Reference> refs = uidoc.Selection.PickObjects(ObjectType.Element, new LineSelectionFilter(), "请在视图中拾取多条模型线或详图线 (选完点左上角完成)");
+                if (refs.Count == 0) return Result.Cancelled;
 
-                // 2. 将线段转化为生成栏杆所需的 CurveLoop
-                Curve curve = curveElem.GeometryCurve;
-                CurveLoop curveLoop = new CurveLoop();
-                curveLoop.Append(curve);
+                List<Curve> curves = new List<Curve>();
+                foreach (Reference r in refs)
+                {
+                    CurveElement curveElem = doc.GetElement(r) as CurveElement;
+                    if (curveElem != null)
+                    {
+                        curves.Add(curveElem.GeometryCurve);
+                    }
+                }
 
-                // 3. 获取生成栏杆所需的标高 (Level)
+                // 🚨 将多条线段转化为连续的 CurveLoop (自动排序)
+                CurveLoop curveLoop = ConnectCurves(curves);
+                if (curveLoop == null) throw new Exception("选择的线段无法形成连续的路径！");
+
                 Level level = doc.ActiveView.GenLevel;
-                if (level == null) // 如果当前视图没有关联标高（比如在三维视图），就随便抓取项目里的第一个标高
+                if (level == null)
                 {
                     level = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().FirstOrDefault();
                 }
                 if (level == null) throw new Exception("当前项目中找不到任何标高，无法生成栏杆！");
 
-                // 4. 弹出生成面板
                 UltimateRailingWindow win = new UltimateRailingWindow(doc, curveLoop, level.Id);
                 if (win.ShowDialog() == true)
                 {
@@ -73,6 +78,58 @@ namespace RevitAddin
                 return Result.Failed;
             }
         }
+
+        // --- 辅助方法：连接多条乱序曲线 ---
+        private CurveLoop ConnectCurves(List<Curve> curves)
+        {
+            if (curves == null || curves.Count == 0) return null;
+
+            CurveLoop loop = new CurveLoop();
+            List<Curve> remaining = new List<Curve>(curves);
+
+            Curve current = remaining[0];
+            loop.Append(current);
+            remaining.RemoveAt(0);
+
+            XYZ currentEnd = current.GetEndPoint(1);
+
+            while (remaining.Count > 0)
+            {
+                bool found = false;
+                for (int i = 0; i < remaining.Count; i++)
+                {
+                    Curve next = remaining[i];
+                    XYZ p0 = next.GetEndPoint(0);
+                    XYZ p1 = next.GetEndPoint(1);
+
+                    if (p0.IsAlmostEqualTo(currentEnd, 0.001))
+                    {
+                        loop.Append(next);
+                        currentEnd = p1;
+                        remaining.RemoveAt(i);
+                        found = true;
+                        break;
+                    }
+                    else if (p1.IsAlmostEqualTo(currentEnd, 0.001))
+                    {
+                        Curve reversed = next.CreateReversed();
+                        loop.Append(reversed);
+                        currentEnd = reversed.GetEndPoint(1);
+                        remaining.RemoveAt(i);
+                        found = true;
+                        break;
+                    }
+                }
+                // 允许硬接防止死循环
+                if (!found)
+                {
+                    loop.Append(remaining[0]);
+                    currentEnd = remaining[0].GetEndPoint(1);
+                    remaining.RemoveAt(0);
+                }
+            }
+            return loop;
+        }
     }
 
     // ==========================================
@@ -81,8 +138,8 @@ namespace RevitAddin
     public class UltimateRailingWindow : System.Windows.Window
     {
         private Document _doc;
-        private CurveLoop _curveLoop; // 接收线段路径
-        private ElementId _levelId;   // 接收标高
+        private CurveLoop _curveLoop;
+        private ElementId _levelId;
 
         private System.Windows.Controls.TextBox txtTopHeight, txtTopW, txtTopH, txtTopT;
         private System.Windows.Controls.TextBox txtRailHeights, txtRailW, txtRailH, txtRailT;
@@ -99,7 +156,7 @@ namespace RevitAddin
             _curveLoop = curveLoop;
             _levelId = levelId;
 
-            this.Title = "一键线段生成栏杆系统";
+            this.Title = "一键多线段生成栏杆系统";
             this.Width = 650;
             this.Height = 700;
             this.WindowStartupLocation = System.Windows.WindowStartupLocation.CenterScreen;
@@ -126,17 +183,14 @@ namespace RevitAddin
             AddHeader(grid, rowIndex, "宽度(mm)", 1); AddHeader(grid, rowIndex, "高度(mm)", 2); AddHeader(grid, rowIndex, "厚度(mm)", 3);
             rowIndex++;
 
-            // === 1. 顶部扶手 ===
             AddSectionTitle("■ 1. 顶部扶手 (Top Rail)");
             AddInputRowSpacing(grid, ref rowIndex, "总高度(mm):", "900", out txtTopHeight);
             AddInputRow(grid, ref rowIndex, "截面尺寸:", "50", "50", "4", out txtTopW, out txtTopH, out txtTopT);
 
-            // === 2. 中间横向扶栏 ===
             AddSectionTitle("■ 2. 中间横杆 (Rail Structure)");
             AddInputRowSpacing(grid, ref rowIndex, "距地高度(逗号分隔):", "700, 100", out txtRailHeights);
             AddInputRow(grid, ref rowIndex, "截面尺寸:", "40", "20", "2", out txtRailW, out txtRailH, out txtRailT);
 
-            // === 3. 主阵列 ===
             AddSectionTitle("■ 3. 主阵列 (Baluster Pattern)");
             AddInputRowSpacing(grid, ref rowIndex, "悬空小竖杆间距(mm):", "150", out txtPicketSpacing);
             AddInputRow(grid, ref rowIndex, "小竖杆独立尺寸:", "20", "20", "2", out txtPicketW, out txtPicketH, out txtPicketT);
@@ -144,8 +198,7 @@ namespace RevitAddin
             AddInputRowSpacing(grid, ref rowIndex, "阵列大立柱间距(mm):", "1200", out txtMainPostSpacing);
             AddInputRow(grid, ref rowIndex, "大立柱独立尺寸:", "60", "60", "4", out txtMainPostW, out txtMainPostH, out txtMainPostT);
 
-            // === 4. 关键节点立柱 ===
-            AddSectionTitle("■ 4. 关键节点 (Start/End/Corner Post)");
+            AddSectionTitle("■ 4. 关键节点立柱");
             AddInputRow(grid, ref rowIndex, "起点立柱尺寸:", "60", "60", "4", out txtStartW, out txtStartH, out txtStartT);
             AddInputRow(grid, ref rowIndex, "终点立柱尺寸:", "60", "60", "4", out txtEndW, out txtEndH, out txtEndT);
 
@@ -158,11 +211,10 @@ namespace RevitAddin
             chkCorner.Checked += (s, e) => { txtCornerW.IsEnabled = true; txtCornerH.IsEnabled = true; txtCornerT.IsEnabled = true; };
             chkCorner.Unchecked += (s, e) => { txtCornerW.IsEnabled = false; txtCornerH.IsEnabled = false; txtCornerT.IsEnabled = false; };
 
-            // === 执行按钮 ===
             grid.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = System.Windows.GridLength.Auto });
             System.Windows.Controls.Button btnApply = new System.Windows.Controls.Button
             {
-                Content = "执行生成: 基于线段创造新栏杆",
+                Content = "执行生成: 基于多线段创造新栏杆",
                 Height = 45,
                 Margin = new System.Windows.Thickness(0, 25, 0, 10),
                 Background = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#0078D7")),
@@ -177,7 +229,6 @@ namespace RevitAddin
             this.Content = scroll;
         }
 
-        // --- UI 辅助方法 ---
         private void AddHeader(System.Windows.Controls.Grid grid, int rowIndex, string text, int col)
         {
             System.Windows.Controls.TextBlock tb = new System.Windows.Controls.TextBlock { Text = text, FontWeight = System.Windows.FontWeights.Bold, HorizontalAlignment = System.Windows.HorizontalAlignment.Center };
@@ -243,18 +294,18 @@ namespace RevitAddin
         }
 
         // ==========================================
-        // 核心生成逻辑: 动态查找母体、组装并凭空生成
+        // 核心生成逻辑: 彻底去掉冗余赋值代码
         // ==========================================
         private void BtnApply_Click(object sender, System.Windows.RoutedEventArgs e)
         {
             try
             {
-                using (Transaction t = new Transaction(_doc, "基于线条生成定制栏杆"))
+                using (Transaction t = new Transaction(_doc, "基于多线段生成定制栏杆"))
                 {
                     t.Start();
 
-                    Family profileFam = LoadFamilyIfNeeded(@"D:\test\test1\test1\截面.rfa", "截面");
-                    Family postFam = LoadFamilyIfNeeded(@"D:\test\test1\test1\中间立柱.rfa", "中间立柱");
+                    Family profileFam = LoadFamilyIfNeeded(@"E:\C#-Revit\test1-master\lh7986815-cmd\test1\test1\截面.rfa", "截面");
+                    Family postFam = LoadFamilyIfNeeded(@"E:\C#-Revit\test1-master\lh7986815-cmd\test1\test1\中间立柱.rfa", "中间立柱");
 
                     FamilySymbol topRailSym = GetOrCreateSym(profileFam, "顶部", txtTopW.Text, txtTopH.Text, txtTopT.Text);
                     FamilySymbol horizRailSym = GetOrCreateSym(profileFam, "横杆", txtRailW.Text, txtRailH.Text, txtRailT.Text);
@@ -264,51 +315,52 @@ namespace RevitAddin
                     FamilySymbol endSym = GetOrCreateSym(postFam, "终点", txtEndW.Text, txtEndH.Text, txtEndT.Text);
                     FamilySymbol cornerSym = chkCorner.IsChecked == true ? GetOrCreateSym(postFam, "转角", txtCornerW.Text, txtCornerH.Text, txtCornerT.Text) : null;
 
-                    // 🚨【核心修改】智能查找母体：在项目中寻找任意一个带阵列规则的系统栏杆作为繁衍母体
+                    // 🚨 务必确信你在项目中将用作母体的那个自带栏杆的对齐设为了“展开样式以匹配”
                     RailingType baseType = new FilteredElementCollector(_doc)
                         .OfClass(typeof(RailingType))
                         .Cast<RailingType>()
                         .FirstOrDefault(rt => rt.BalusterPlacement.BalusterPattern.GetBalusterCount() > 0);
 
-                    if (baseType == null) throw new Exception("当前项目中没有找到任何带有竖杆设置的栏杆类型！请在项目中随意载入或绘制一个常规栏杆作为母体。");
+                    if (baseType == null) throw new Exception("未找到有竖杆设置的栏杆类型作为母体！");
 
-                    RailingType newType = baseType.Duplicate("全栈定制款栏杆_" + Guid.NewGuid().ToString().Substring(0, 4)) as RailingType;
+                    RailingType newType = baseType.Duplicate("全栈定制_" + Guid.NewGuid().ToString().Substring(0, 4)) as RailingType;
 
-                    // --- 2. 顶部扶手 ---
                     ElementId topRailId = newType.TopRailType;
-                    TopRailType newTop = null;
                     if (topRailId != ElementId.InvalidElementId)
                     {
                         TopRailType oldTop = _doc.GetElement(topRailId) as TopRailType;
-                        newTop = oldTop.Duplicate("定制顶部_" + Guid.NewGuid().ToString().Substring(0, 4)) as TopRailType;
-                    }
-                    else
-                    {
-                        // 如果母体刚好没有顶栏，我们在系统里随便找一个顶栏类型来复制
-                        TopRailType oldTop = new FilteredElementCollector(_doc).OfClass(typeof(TopRailType)).Cast<TopRailType>().FirstOrDefault();
-                        if (oldTop != null) newTop = oldTop.Duplicate("定制顶部_" + Guid.NewGuid().ToString().Substring(0, 4)) as TopRailType;
+                        TopRailType newTop = oldTop.Duplicate("定制顶部_" + Guid.NewGuid().ToString().Substring(0, 4)) as TopRailType;
+                        newType.TopRailType = newTop.Id;
+                        newTop.ProfileId = topRailSym.Id;
                     }
 
                     Parameter pTopHeight = newType.get_Parameter(BuiltInParameter.RAILING_SYSTEM_TOP_RAIL_HEIGHT_PARAM);
                     if (pTopHeight != null && !pTopHeight.IsReadOnly) pTopHeight.Set(double.Parse(txtTopHeight.Text) / 304.8);
 
-                    // --- 3. 横向扶栏 ---
+                    // --- 横杆处理 (实时代理，只改不设) ---
                     NonContinuousRailStructure rails = newType.RailStructure;
-                    for (int i = rails.GetNonContinuousRailCount() - 1; i >= 0; i--) rails.RemoveNonContinuousRail(i);
+                    while (rails.GetNonContinuousRailCount() > 0)
+                    {
+                        rails.RemoveNonContinuousRail(0);
+                    }
 
                     string[] heightStrs = txtRailHeights.Text.Split(new char[] { ',', '，' });
                     List<double> parsedHeights = heightStrs.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => double.Parse(s.Trim())).OrderByDescending(h => h).ToList();
 
                     for (int i = 0; i < parsedHeights.Count; i++)
                     {
-                        NonContinuousRailInfo newRail = rails.AddNonContinuousRail($"横向扶栏 {i + 1}", parsedHeights[i] / 304.8, 0.0);
+                        NonContinuousRailInfo newRail = rails.AddNonContinuousRail($"横杆 {i + 1}", parsedHeights[i] / 304.8, 0.0);
                         newRail.ProfileId = horizRailSym.Id;
                     }
 
-                    // --- 4. 强力接管主阵列 (先天基因注入版推箱子) ---
+                    // --- 主阵列处理 (实时代理，只改不设) ---
                     BalusterPlacement bp = newType.BalusterPlacement;
                     BalusterPattern pat = bp.BalusterPattern;
 
+                    pat.DistributionJustification = PatternJustification.SpreadPatternToFit;
+
+                    // 越界保险：如果没有行，先造一行出来
+                    if (pat.GetBalusterCount() == 0) pat.DuplicateBaluster(0);
                     while (pat.GetBalusterCount() > 1) pat.RemoveBaluster(pat.GetBalusterCount() - 1);
 
                     double pSpace = double.Parse(txtPicketSpacing.Text);
@@ -317,11 +369,8 @@ namespace RevitAddin
                     if (totalRows < 1) totalRows = 1;
 
                     BalusterInfo bInfo0 = pat.GetBaluster(0);
-
-                    string picketTopRef = parsedHeights.Count > 0 ? "横向扶栏 1" : "顶部扶栏图元";
-                    string picketBaseRef = parsedHeights.Count > 0 ? $"横向扶栏 {parsedHeights.Count}" : "主体";
-                    string mainPostTopRef = "顶部扶栏图元";
-                    string mainPostBaseRef = "主体";
+                    string picketTopRef = parsedHeights.Count > 0 ? "横杆 1" : "顶部扶栏图元";
+                    string picketBaseRef = parsedHeights.Count > 0 ? $"横杆 {parsedHeights.Count}" : "主体";
 
                     if (totalRows == 1)
                     {
@@ -333,14 +382,16 @@ namespace RevitAddin
                     }
                     else
                     {
+                        // 大柱基因
                         bInfo0.BalusterFamilyId = mainPostSym.Id;
-                        bInfo0.TopReferenceName = mainPostTopRef;
-                        bInfo0.BaseReferenceName = mainPostBaseRef;
+                        bInfo0.TopReferenceName = "顶部扶栏图元";
+                        bInfo0.BaseReferenceName = "主体";
                         bInfo0.DistanceFromPreviousOrSpace = pSpace / 304.8;
                         bInfo0.TopOffset = 0.0; bInfo0.BaseOffset = 0.0;
 
                         pat.DuplicateBaluster(0);
 
+                        // 小杆基因
                         bInfo0 = pat.GetBaluster(0);
                         bInfo0.BalusterFamilyId = picketSym.Id;
                         bInfo0.TopReferenceName = picketTopRef;
@@ -352,7 +403,7 @@ namespace RevitAddin
                         }
                     }
 
-                    // --- 5. 节点立柱 ---
+                    // --- 节点立柱处理 ---
                     PostPattern postPat = bp.PostPattern;
 
                     if (postPat.StartPost != null)
@@ -382,7 +433,7 @@ namespace RevitAddin
                         postPat.CornerPost.BalusterFamilyId = ElementId.InvalidElementId;
                     }
 
-                    // 🚨【核心修改】无中生有：直接在提取的线段位置，利用配置好的新类型创建实体栏杆！
+                    // 直接生成！不加多余的废话
                     Railing.Create(_doc, _curveLoop, newType.Id, _levelId);
 
                     _doc.Regenerate();
@@ -391,7 +442,7 @@ namespace RevitAddin
 
                 this.DialogResult = true;
                 this.Close();
-                Autodesk.Revit.UI.TaskDialog.Show("创建成功", "已成功沿着您拾取的线段生成了全参化定制栏杆！");
+                Autodesk.Revit.UI.TaskDialog.Show("生成成功", "多段折线生成完成！");
             }
             catch (Exception ex)
             {
